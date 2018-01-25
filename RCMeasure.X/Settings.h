@@ -18,6 +18,7 @@
 
 #define CN_IP       2     
 #define T2_IP       1  
+#define U1RX_IP     3
     
 /**
  *  PIC
@@ -31,7 +32,7 @@
 /**
  * UART
  */      
-#define UART1_BAUD      9600
+#define UART1_BAUD      57600
 #define UART1_ID        2   
 
 #define UART1_RX_Dir    TRISBbits.TRISB6    /* RX Pin on RP38-RB6             */
