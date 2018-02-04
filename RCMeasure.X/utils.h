@@ -16,5 +16,13 @@ bool stringEquals(const char * str1, const char * str2);
 
 uint16_t stringToInt(const char * str);
 
+/**
+ * Find the minimum value in an array
+ * @param values: the array
+ * @param length: length of the array
+ * @return index of smallest element
+ */
+uint16_t minimumValue(float *values, uint16_t length);
+
 #endif	/* XC_HEADER_TEMPLATE_H */
 

@@ -26,3 +26,16 @@ uint16_t stringToInt(const char * str) {
     }
     return val;
 }
+
+uint16_t minimumValue(float *values, uint16_t length) {
+    float min = values[0];
+    uint16_t ndx = 0;
+    uint16_t i;
+    for (i = 1; i < length; i++) {
+        if (values[i] < min) {
+            min = values[i];
+            ndx = i;
+        }
+    }
+    return ndx;
+}

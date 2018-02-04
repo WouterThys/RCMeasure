@@ -12,23 +12,20 @@
 #include <stdint.h>        /* Includes uint16_t definition                    */
 #include <stdbool.h>       /* Includes true/false definition                  */
 #include <string.h>
+#include <math.h>
 
 #include "Settings.h"
 
 #include "Drivers/INTERRUPT_Driver.h"
 #include "Drivers/SYSTEM_Driver.h"
 #include "Drivers/UART_Driver.h"
+#include "Drivers/CTMU_Driver.h"
+#include "utils.h"
 
 /*******************************************************************************
  *          DEFINES
  ******************************************************************************/
-#define CTMU_MODE_EDGE  0
-#define RANGE_550uA     3       // 100x base current of 0.55 µA
-#define RCAL            10e3    // R is 10k
-#define ADSCALE         1023    // 10-bit ADC
-#define ADREF           3.3     // Vref is 3.3V
 
-#define ITERATIONS      10      // Number of iterations
 
 
 /*******************************************************************************
@@ -38,13 +35,14 @@
 /*******************************************************************************
  *          VARIABLES
  ******************************************************************************/
+CData_t capacitanceData; // Data struct for capacitance
+
 
 /*******************************************************************************
  *          LOCAL FUNCTIONS
  ******************************************************************************/
 static void initialize();
-static uint16_t ctmuCurrentCalibrate(uint16_t mode, uint16_t range, int16_t trim);
-static void ctmuCurrentIterate(float *results);
+static void printCapData(CData_t *cData);
 
 void initialize() {
     D_INT_EnableInterrupts(false);
@@ -59,93 +57,18 @@ void initialize() {
     D_INT_EnableInterrupts(true);
 }
 
-uint16_t ctmuCurrentCalibrate(uint16_t mode, uint16_t range, int16_t trim) {
-    
-    // Clear before start
-    CTMUCON1 = 0x0000;
-    CTMUCON2 = 0x0000;
-    CTMUICON = 0x0000;
-    
-    AD1CON1 = 0x0000;
-    AD1CON2 = 0x0000;
-    AD1CON3 = 0x0000;
-    
-    // Step 1: Configure the CTMU
-    CTMUCON1bits.CTMUEN = 0;    // Disable CTMU
-    CTMUCON1bits.TGEN = mode;   // Enable/Disable Time Generation Mode
-    CTMUCON1bits.EDGEN = 0;     // Edges are disabled
-    CTMUCON1bits.IDISSEN = 0;   // Current source is not grounded
-    CTMUCON1bits.CTTRIG = 0;    // Trigger output disabled
-    
-    CTMUICONbits.IRNG = (range & 0x0003); //Set range
-    CTMUICONbits.ITRIM = (trim & 0x003F); //Trim
-    
-    // Step 2: Configure GPIO
-    TRISAbits.TRISA0 = 1;       // AN0 is input for ADC 
-    ANSELAbits.ANSA0 = 1;       // AN0 is analog
-    
-    // Step 3: Configure ADC
-    AD1CHS0bits.CH0SA = 0;      // Channel 0 positive input is AN0
-    
-    AD1CON1bits.ADON = 1;       // AD is on
-    AD1CON1bits.AD12B = 0;      // 10-bit
-    AD1CON1bits.FORM = 0b00;    // Integer output
-    
-    // Step 4-6: Enable the current source an start sampling
-    CTMUCON1bits.CTMUEN = 1;    // Enable the CTMU
-    CTMUCON2bits.EDG1STAT = 1;  // Enable current source
-    AD1CON1bits.SAMP = 1;       // Manual sampling start
-    
-    // Step 7: Wait for sample
-    DelayMs(2);
-    
-    // Step 8: Convert the sample
-    AD1CON1bits.SAMP = 0;       // Begin AD conversion
-    while (AD1CON1bits.DONE == 0);
-    
-    // Step 9: Disable the CTMU
-    CTMUCON2bits.EDG1STAT = 0;  // Disable current source
-    IFS0bits.AD1IF = 0;         // Clear interrupt flag
-    CTMUCON1bits.CTMUEN = 0;    // Disable CTMU
-    
-    
-    // Clean up
-    TRISAbits.TRISA0 = 0;       // AN0 is output 
-    ANSELAbits.ANSA0 = 0;       // AN0 is digital
-    
-    // Result
-    return ADC1BUF0;
+void printCapData(CData_t* cData) {
+    printf(" -> Cx = %eF\n", cData->Cx);
+    printf("   -Ci = %eF\n", cData->Ci);
+    printf("   -Range = %d\n", cData->range);
+    printf("   -Current = %eA\n", cData->current);
+    printf("   -Cur ADC = %d\n", cData->curAdcVal);
+    printf("   -Delay = %d\n", cData->delay);
+    printf("   -Cap ADC = %d\n", cData->capAdcVal);
+    printf("   -Iterations = %d\n", cData->iterations);
+    printf("\n\n\n");
 }
 
-static void ctmuCurrentIterate(float *results) {
-    float cntsAvg = 0;
-    float cntsTot = 0;
-    float ctmuISrc = 0;
-    float result = 0;
-    int16_t cal;
-    uint16_t cnt = 0;
-    for (cal = -30; cal <= 30; cal++) {
-        result = 0;
-        cntsAvg = 0;
-        ctmuISrc = 0;
-        cntsTot = 0;
-
-        uint16_t x = 0;
-        for (x = 0; x < ITERATIONS; x++) {
-            result = (ctmuCurrentCalibrate(CTMU_MODE_EDGE, RANGE_550uA, cal));
-            cntsTot += result;
-        }
-
-        // Average
-        cntsAvg = (cntsTot / ITERATIONS);
-        
-        *(results + cnt) = cntsAvg;
-        cnt++;
-        DelayMs(10);
-        //vCal = (cntsAvg / ADSCALE * ADREF);
-        //ctmuISrc = (vCal / RCAL) * 1000000; // Current in µA
-    }
-}
 
 /*******************************************************************************
  *          MAIN PROGRAM
@@ -159,26 +82,38 @@ int main(void) {
     D_UART_Init(UART_MODULE_1, UART1_BAUD);
     D_UART_Enable(UART_MODULE_1, true);
    
-    DelayMs(100);
+    DelayMs(1000);
     
-    float results[60];
-    float *result;
+    printf("\n *** Start *** \n");
     
-    result = results;
-   
-    ctmuCurrentIterate(result);    
-    
-    uint16_t cnt = 0;
-    for (cnt = 0; cnt < 60; cnt++) {
-        printf("%d: %f\n", cnt, *(result+cnt));
-        DelayMs(1);
-    }
-        
-    
-    
+    TRISBbits.TRISB5 = 1; // Input
+    uint16_t ledCnt = 0;
     while (1) {
-        LED1 = !LED1;
-        DelayMs(1000); 
+        if (PORTBbits.RB5 == 1) {
+            LED1 = 0;
+            // Clear all data
+            capacitanceData.Ci = -1;
+            capacitanceData.Cx = -1;
+            capacitanceData.range = 0;
+            capacitanceData.current = -1;
+            capacitanceData.curAdcVal = 0;
+            capacitanceData.delay = 0;
+            capacitanceData.capAdcVal = 0;
+            capacitanceData.iterations = 0;
+            
+            // Let the magic happen
+            printf("\n** Start C measurement...");
+            capacitanceMeasure(&capacitanceData);
+            printCapData(&capacitanceData);
+        }
+        
+        // Led and de-bounce 
+        ledCnt++;
+        if (ledCnt > 20) {
+            ledCnt = 0;
+            LED1 = !LED1;
+        }
+        DelayMs(20); 
     }
     return 0;
 }
@@ -264,5 +199,60 @@ int main(void) {
 58: 274.200012
 59: 278.899994
  */
+
+
+//static void ctmuCurrentIterate(float *results);
+//static void ctmuCurrentBestTrim(float *results,  int16_t *bestTrim, float *current);
+//static void ctmuCurrentIterate(float *results) {
+//    float cntsAvg = 0;
+//    float cntsTot = 0;
+//    float ctmuISrc = 0;
+//    float result = 0;
+//    int16_t cal;
+//    uint16_t cnt = 0;
+//    for (cal = -(TRIMRANGE/2); cal < (TRIMRANGE/2); cal++) {
+//        result = 0;
+//        cntsAvg = 0;
+//        ctmuISrc = 0;
+//        cntsTot = 0;
+//
+//        uint16_t x = 0;
+//        for (x = 0; x < ITERATIONS; x++) {
+//            result = (ctmuCurrentCalibrate(CTMU_MODE_EDGE, RANGE_0_55uA, cal));
+//            cntsTot += result;
+//        }
+//
+//        // Average
+//        cntsAvg = (cntsTot / ITERATIONS);
+//        
+//        *(results + cnt) = cntsAvg;
+//        cnt++;
+//        DelayMs(1);
+//    }
+//}
+//
+//void ctmuCurrentBestTrim(float *results, int16_t *bestTrim, float *current) {
+//    float expected = (RCAL * BASE_CURRENT * ADSCALE) / ADREF;
+//    
+//    float dif[TRIMRANGE];
+//    
+//    // Find differences from expected counts
+//    uint16_t cnt;
+//    for (cnt = 0; cnt < TRIMRANGE; cnt++) {
+//        float d = (*(results + cnt) - expected);
+//        if (d < 0) {
+//            dif[cnt] = -1 * d;
+//        } else {
+//            dif[cnt] = d;
+//        }
+//    }
+//    
+//    // Index of minimum difference
+//    uint16_t bestNdx = minimumValue(dif, TRIMRANGE);
+//    
+//    // Results
+//    *bestTrim = bestNdx - (TRIMRANGE / 2);
+//    *current = (results[bestNdx] * ADREF) / (RCAL * ADSCALE);
+//}
 
 
