@@ -16,16 +16,23 @@
 #define RESULT_OF  1    /* Overflow                                           */
 
 
+uint16_t ranges[4] = {RANGE_0_55uA, RANGE_5_50uA, RANGE_55_0uA, RANGE_550_uA};
+
+
 /*******************************************************************************
  *          LOCAL FUNCTIONS
  ******************************************************************************/
 static void     ctmuConfigure(uint16_t mode, uint16_t range, int16_t trim, uint16_t ground);
-static void     ctmuCalculateCapacitance(uint16_t counts, uint16_t delay, double I, double *C);
-static int16_t  ctmuCapacitanceLogic(CData_t *capacitance);
 static double   ctmuCountsToCurrent(uint16_t counts, uint16_t range);
 static double   ctmuCountsToVoltage(uint16_t counts);
 static uint16_t ctmuOptimalDelay(uint16_t range);
 static void     ctmuSelectRange(uint16_t range);
+
+static void     ctmuCalculateCapacitance(uint16_t counts, uint16_t delay, double I, double *C);
+static void     ctmuCalculateResistance(uint16_t counts, double I, double *R);
+
+static int16_t  ctmuCapacitanceLogic(CData_t *cData);
+static int16_t  ctmuResistanceLogic(RData_t *rData);
 
 // Current
 static uint16_t ctmuCurrentMeasure(uint16_t mode, uint16_t range, int16_t trim);
@@ -33,6 +40,9 @@ static void     ctmuCurrentIterate(uint16_t range, uint16_t *counts, double *cur
 // Capacitance
 static uint16_t ctmuCapacitanceMeasure(uint16_t mode, uint16_t range, uint16_t delay, bool calibration);
 static void     ctmuCapacitanceIterate(uint16_t range, uint16_t delay, double current, bool calibration, uint16_t *counts);
+// Resistance
+static uint16_t ctmuResistanceMeasure(uint16_t mode, uint16_t range, int16_t trim);
+static void     ctmuResistanceIterate(uint16_t range, uint16_t *counts);
 
 
 /*******************************************************************************
@@ -77,6 +87,17 @@ void ctmuCalculateCapacitance(uint16_t counts, uint16_t delay, double I, double 
     double t = delay * 1e-6;
     double V = ctmuCountsToVoltage(counts);
     *C = (I * t) / V;
+}
+
+/**
+ * Calculate the resistance by
+ * @param counts ADC measurement value
+ * @param I Current
+ * @param R Resistance
+ */
+void ctmuCalculateResistance(uint16_t counts, double I, double *R) {
+    double V = ctmuCountsToVoltage(counts);
+    *R = V / I;
 }
 
 /**
@@ -323,13 +344,72 @@ void ctmuCapacitanceIterate(uint16_t range, uint16_t delay, double current, bool
 }
 
 /**
+ * Measures external resistance
+ * @param mode Enable/Disable Time Generation Mode
+ * @param range Select the current source range, I_BASE, 10x I_BASE or 100x I_BASE
+ * @param trim Trim value for the current source
+ * @return ADC value measured 
+ */
+uint16_t ctmuResistanceMeasure(uint16_t mode, uint16_t range, int16_t trim) {
+    // Step 1: Configure the CTMU
+    ctmuConfigure(mode, range, trim, 0); // Current source is not grounded
+    
+    // Step 2: Configure GPIO
+    TRISBbits.TRISB1 = 1;       // AN3 is input for ADC 
+    ANSELBbits.ANSB1 = 1;       // AN3 is analog
+    
+    // Step 3: Configure ADC
+    AD1CHS0bits.CH0SA = 3;      // Channel 3 positive input is AN3
+    
+    AD1CON1bits.ADON = 1;       // AD is on
+    AD1CON1bits.AD12B = 0;      // 10-bit
+    AD1CON1bits.FORM = 0b00;    // Integer output
+    
+    // Step 4-6: Enable the current source an start sampling
+    CTMUCON1bits.CTMUEN = 1;    // Enable the CTMU
+    CTMUCON2bits.EDG1STAT = 1;  // Enable current source
+    AD1CON1bits.SAMP = 1;       // Manual sampling start
+    
+    // Step 7: Wait for sample
+    DelayMs(2);
+    
+    // Step 8: Convert the sample
+    AD1CON1bits.SAMP = 0;       // Begin AD conversion
+    while (AD1CON1bits.DONE == 0);
+    
+    // Step 9: Disable the CTMU
+    CTMUCON2bits.EDG1STAT = 0;  // Disable current source
+    IFS0bits.AD1IF = 0;         // Clear interrupt flag
+    CTMUCON1bits.CTMUEN = 0;    // Disable CTMU
+    
+    // Clean up
+    TRISBbits.TRISB1 = 0;       // AN3 is output
+    ANSELBbits.ANSB1 = 0;       // AN3 is digital
+    
+    // Result
+    return ADC1BUF0;
+}
+
+void ctmuResistanceIterate(uint16_t range, uint16_t *counts) {
+    double cntsTot = 0;
+    
+    // Iterate
+    uint16_t x; 
+    for (x = 0; x < IIT_CALIBRATE; x++) {
+        cntsTot += (double)(ctmuResistanceMeasure(CTMU_MODE_EDGE, range, 0));
+    }
+    
+    // Result is average
+    *counts = cntsTot / IIT_CALIBRATE;
+}
+
+/**
  * Calculates the capacitance for a given current source range
  *  Step 1: Calculate actual current
  *  Step 2: Calculate system capacitance
  *  Step 3: Start iterating the input chanel until accurate result is found
  *  Step 4: Calculate the capacitance if accurate value is found
- * @param range Current source range
- * @param capacitance
+ * @param cData Contains settings and results
  * @return OK, UF (underflow) or OF (overflow)
  */
 int16_t ctmuCapacitanceLogic(CData_t *cData) {
@@ -346,7 +426,7 @@ int16_t ctmuCapacitanceLogic(CData_t *cData) {
     
     if (DEBUG) printf("*R=%d (I, D, C)\n", range);
     
-    // Step 0: Select resistor
+    // Step 0: Select resistor for range
     ctmuSelectRange(range);
     
     // Step 1: Calculate actual current
@@ -401,12 +481,46 @@ int16_t ctmuCapacitanceLogic(CData_t *cData) {
     return result;
 }
 
+/**
+ * 
+ * @param rData
+ * @return OK, UF (underflow) or OF (overflow)
+ */
+int16_t ctmuResistanceLogic(RData_t *rData) {
+    uint16_t counts = 0;
+    double current = 0;
+    double resistance = -1;
+    
+    uint16_t r;
+    for (r = 0; r < 4; r++) {
+        uint16_t range = ranges[r];
+        // Step 0: Select resistor for range
+        ctmuSelectRange(range);
+
+        // Step 1: Calculate actual current
+        ctmuCurrentIterate(range, &counts, &current);
+        rData->curAdcVal = counts;
+        rData->current = current;
+
+        // Step 2: Calculate resistance
+        ctmuResistanceIterate(range, &counts);
+        ctmuCalculateResistance(counts, current, &resistance);
+//        switch (range) {
+//            case RANGE_0_55uA: ctmuCalculateResistance(counts, 0.55e-6, &resistance); break;
+//            case RANGE_5_50uA: ctmuCalculateResistance(counts, 5.50e-6, &resistance); break;
+//            case RANGE_55_0uA: ctmuCalculateResistance(counts, 55.0e-6, &resistance); break;
+//            case RANGE_550_uA: ctmuCalculateResistance(counts,  550e-6, &resistance); break;
+//        };
+        
+        rData->Rrange[r] = resistance;
+    }
+    return RESULT_OF;
+}
 
 /*******************************************************************************
  *          DRIVER FUNCTIONS
  ******************************************************************************/
 
-uint16_t ranges[4] = {RANGE_0_55uA, RANGE_5_50uA, RANGE_55_0uA, RANGE_550_uA};
 void capacitanceMeasure(CData_t *cData) {
     uint16_t r;
     for (r = 0; r < 4; r++) {
@@ -417,6 +531,12 @@ void capacitanceMeasure(CData_t *cData) {
     }
     
     cData->Cx = -1;
+}
+
+void resistanceMeasure(RData_t *rData) {
+    if (ctmuResistanceLogic(rData) == RESULT_OK) {
+            return; // Ready!
+    }
 }
 
 

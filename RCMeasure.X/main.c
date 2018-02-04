@@ -36,13 +36,19 @@
  *          VARIABLES
  ******************************************************************************/
 CData_t capacitanceData; // Data struct for capacitance
+RData_t resistanceData; // Data struct for resistance
 
 
 /*******************************************************************************
  *          LOCAL FUNCTIONS
  ******************************************************************************/
 static void initialize();
+
+static void startCapMeasurement();
 static void printCapData(CData_t *cData);
+
+static void startResMeasurement();
+static void printResData(RData_t *rData);
 
 void initialize() {
     D_INT_EnableInterrupts(false);
@@ -57,6 +63,24 @@ void initialize() {
     D_INT_EnableInterrupts(true);
 }
 
+void startCapMeasurement() {
+     LED1 = 0;
+    // Clear all data
+    capacitanceData.Ci = -1;
+    capacitanceData.Cx = -1;
+    capacitanceData.range = 0;
+    capacitanceData.current = -1;
+    capacitanceData.curAdcVal = 0;
+    capacitanceData.delay = 0;
+    capacitanceData.capAdcVal = 0;
+    capacitanceData.iterations = 0;
+
+    // Let the magic happen
+    printf("\n** Start C measurement...");
+    capacitanceMeasure(&capacitanceData);
+    printCapData(&capacitanceData);
+}
+
 void printCapData(CData_t* cData) {
     printf(" -> Cx = %eF\n", cData->Cx);
     printf("   -Ci = %eF\n", cData->Ci);
@@ -66,6 +90,34 @@ void printCapData(CData_t* cData) {
     printf("   -Delay = %d\n", cData->delay);
     printf("   -Cap ADC = %d\n", cData->capAdcVal);
     printf("   -Iterations = %d\n", cData->iterations);
+    printf("\n\n\n");
+}
+
+void startResMeasurement() {
+    LED1 = 0;
+    // Clear all data
+    resistanceData.Rx = -1;
+    resistanceData.range = 0;
+    resistanceData.current = -1;
+    resistanceData.curAdcVal = 0;
+    
+    // Let the magic happen
+    printf("\n** Start R measurement...");
+    resistanceMeasure(&resistanceData);
+    printResData(&resistanceData);
+}
+
+void printResData(RData_t *rData) {
+    printf(" -> Rx = %e\n", rData->Rx);
+    printf("   -Range = %d\n", rData->range);
+    printf("   -Current = %eA\n", rData->current);
+    printf("   -Cur ADC = %d\n", rData->curAdcVal);
+   
+    printf("    - R 0.55u = %e\n", rData->Rrange[0]);
+    printf("    - R 5.50u = %e\n", rData->Rrange[1]);
+    printf("    - R 55.0u = %e\n", rData->Rrange[2]);
+    printf("    - R 550.u = %e\n", rData->Rrange[3]);
+    
     printf("\n\n\n");
 }
 
@@ -90,21 +142,8 @@ int main(void) {
     uint16_t ledCnt = 0;
     while (1) {
         if (PORTBbits.RB5 == 1) {
-            LED1 = 0;
-            // Clear all data
-            capacitanceData.Ci = -1;
-            capacitanceData.Cx = -1;
-            capacitanceData.range = 0;
-            capacitanceData.current = -1;
-            capacitanceData.curAdcVal = 0;
-            capacitanceData.delay = 0;
-            capacitanceData.capAdcVal = 0;
-            capacitanceData.iterations = 0;
-            
-            // Let the magic happen
-            printf("\n** Start C measurement...");
-            capacitanceMeasure(&capacitanceData);
-            printCapData(&capacitanceData);
+            //startCapMeasurement();
+            startResMeasurement();
         }
         
         // Led and de-bounce 
